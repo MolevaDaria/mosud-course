@@ -34,10 +34,17 @@ LIMIT 10;
 
 -- 3. LEFT JOIN: сохраняем клиентов без заказов
 
+-- Демонстрация LEFT JOIN: добавляем "фейкового" клиента без заказов
+WITH fake_customer AS (
+    SELECT 'fake_customer_id' AS customer_id, 
+           'fake_unique_id'  AS customer_unique_id
+    UNION ALL
+    SELECT customer_id, customer_unique_id FROM customers
+)
 SELECT 
     c.customer_unique_id,
     count(DISTINCT o.order_id) AS total_orders
-FROM customers c
+FROM fake_customer c
 LEFT JOIN orders o ON c.customer_id = o.customer_id
 GROUP BY c.customer_unique_id
 ORDER BY total_orders ASC
