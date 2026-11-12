@@ -3,43 +3,48 @@
 
 SET search_path TO olist, public;
 
-
 -- 1. Основной запрос (минимум 3 таблицы)
--- Показываем количество заказов у каждого уникального клиента
--- и даты его первой и последней покупки.
+-- customers -> orders -> order_items
+-- Показываем количество заказов, общее количество купленных товаров
+-- и даты первой/последней покупки для каждого уникального клиента.
+
 SELECT 
     c.customer_unique_id,
-    count(o.order_id) AS total_orders,
+    count(DISTINCT o.order_id) AS total_orders,       -- уникальные заказы
+    count(oi.order_item_id)    AS total_items,        -- общее кол-во товаров
     min(o.order_purchase_timestamp) AS first_purchase,
     max(o.order_purchase_timestamp) AS last_purchase
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o      ON c.customer_id = o.customer_id
+JOIN order_items oi ON o.order_id = oi.order_id
 GROUP BY c.customer_unique_id
-HAVING count(o.order_id) > 1  -- Оставляем только тех, кто покупал больше 1 раза
+HAVING count(DISTINCT o.order_id) > 1                 -- только повторные покупатели
 ORDER BY total_orders DESC
 LIMIT 10;
 
--- 2. Кратность связей для каждого JOIN
--- customers → orders: 1 : N (у одного customer_id может быть только один заказ, 
--- но у одного customer_unique_id может быть несколько customer_id, 
--- каждый из которых ссылается на свой заказ).
--- Значит, customers (по customer_unique_id) 1 : N orders.
 
--- 3. Добавление LEFT JOIN (объекты без связанных строк)
--- Найдем всех клиентов, даже если у них нет заказов (в Olist таких нет, 
--- но для демонстрации LEFT JOIN это сработает).
+-- 2. Кратность связей
+
+-- customers -> orders: 1:N (у одного customer_unique_id может быть несколько
+--   customer_id, каждый из которых ссылается на заказ; у одного customer_id
+--   в Olist обычно один заказ).
+-- orders -> order_items: 1:N (в одном заказе несколько позиций).
+-- Итоговая связь customers -> order_items через orders: 1:N.
+
+
+-- 3. LEFT JOIN: сохраняем клиентов без заказов
 
 SELECT 
     c.customer_unique_id,
-    count(o.order_id) AS total_orders
+    count(DISTINCT o.order_id) AS total_orders
 FROM customers c
 LEFT JOIN orders o ON c.customer_id = o.customer_id
 GROUP BY c.customer_unique_id
 ORDER BY total_orders ASC
 LIMIT 5;
 
--- 4. Антисоединение: найти объекты, для которых нет связанной строки
--- Например, клиентов, у которых вообще нет ни одного заказа.
+
+-- 4. Антисоединение: клиенты без единого заказа
 
 SELECT 
     c.customer_id,
@@ -51,26 +56,24 @@ LIMIT 10;
 
 
 -- 5. Намеренно ошибочный JOIN (размножение строк)
--- Если мы попытаемся соединить customers с orders и order_items напрямую,
--- то для каждого заказа с несколькими товарами строка клиента размножится.
+-- Прямое соединение orders и order_items без DISTINCT/агрегации
+-- завышает count: считаются не заказы, а позиции в заказах.
 
 SELECT 
     c.customer_unique_id,
     count(oi.order_id) AS total_items_in_orders
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o      ON c.customer_id = o.customer_id
 JOIN order_items oi ON o.order_id = oi.order_id
 GROUP BY c.customer_unique_id
 ORDER BY total_items_in_orders DESC
 LIMIT 10;
+-- Здесь count(oi.order_id) считает позиции, а не заказы => завышение.
 
--- Ошибка здесь: count(oi.order_id) считает не количество заказов, 
--- а количество позиций (товаров) во всех заказах клиента! 
--- Это завышает счетчик.
 
--- 6. Исправление ошибки (предварительная агрегация)
--- Сначала агрегируем order_items до уровня заказа, 
--- а потом соединяем с клиентами.
+-- 6. Исправление ошибки: предварительная агрегация order_items
+-- Сначала агрегируем позиции до уровня заказа, затем соединяем.
+
 WITH order_sums AS (
     SELECT 
         order_id, 
@@ -80,26 +83,27 @@ WITH order_sums AS (
 )
 SELECT 
     c.customer_unique_id,
-    count(o.order_id) AS total_orders,
-    sum(os.items_in_order) AS total_items
+    count(DISTINCT o.order_id) AS total_orders,
+    sum(os.items_in_order)     AS total_items
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o      ON c.customer_id = o.customer_id
 JOIN order_sums os ON o.order_id = os.order_id
 GROUP BY c.customer_unique_id
 ORDER BY total_items DESC
 LIMIT 10;
--- Теперь мы корректно получаем количество заказов и сумму товаров, 
--- размножения строк нет.
+-- Теперь total_orders — реальное число заказов, total_items — сумма позиций.
+-- Размножения строк нет.
 
 
--- 7. Реляционная алгебра
+-- 7. Реляционная алгебра для основного запроса (пункт 1)
 
--- Основной запрос:
--- 1. ρ(c)(customers)
--- 2. ρ(o)(orders)
--- 3. customers ⋈_{customer_id} orders
--- 4. π(customer_unique_id, order_id, order_purchase_timestamp)
--- 5. γ_{customer_unique_id}(count(order_id) → total_orders,
---                          min(order_purchase_timestamp) → first_purchase,
---                          max(order_purchase_timestamp) → last_purchase)
--- 6. σ_{total_orders > 1}
+-- 1. ρ(c)(customers), ρ(o)(orders), ρ(oi)(order_items)
+-- 2. customers ⋈_{customer_id} orders ⋈_{order_id} order_items
+-- 3. π(customer_unique_id, order_id, order_item_id,
+--      order_purchase_timestamp)
+-- 4. γ_{customer_unique_id}(
+--      count(DISTINCT order_id) -> total_orders,
+--      count(order_item_id)     -> total_items,
+--      min(order_purchase_timestamp) -> first_purchase,
+--      max(order_purchase_timestamp) -> last_purchase)
+-- 5. σ_{total_orders > 1}
